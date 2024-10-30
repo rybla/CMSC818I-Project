@@ -1,0 +1,3 @@
+[submodule "pybughive"]
+	path = pybughive
+	url = git@github.com:pybughive/pybughive.git
