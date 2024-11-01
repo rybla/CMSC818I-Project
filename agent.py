@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 import json
 import html
@@ -26,9 +27,24 @@ from ai import client
 
 @dataclass
 class AgentParams:
+    name: str
     model: ChatModel
     max_questions: int
-    pass
+
+
+class AgentState:
+    gas: int
+    prompt: str
+    messages: list[ChatCompletionMessageParam]
+
+    def __init__(
+        self,
+        gas: int,
+        prompt: str,
+    ):
+        self.gas = gas
+        self.prompt = prompt
+        self.messages = [ChatCompletionUserMessageParam(role="user", content=prompt)]
 
 
 class AgentException(Exception):
@@ -38,15 +54,13 @@ class AgentException(Exception):
 
 class Agent:
     params: AgentParams
+    state: AgentState
 
-    def __init__(self, params: AgentParams) -> None:
+    def __init__(self, params: AgentParams, state: AgentState) -> None:
         self.params = params
-        pass
+        self.state = state
 
-    def run(self, gas: int, first_message: str):
-        messages: list[ChatCompletionMessageParam] = [
-            ChatCompletionUserMessageParam(role="user", content=first_message),
-        ]
+    def run(self):
         tools: list[ChatCompletionToolParam] = [
             ChatCompletionToolParam(
                 type="function",
@@ -69,9 +83,11 @@ class Agent:
             )
         ]
 
-        for _ in range(gas):
+        while self.state.gas > 0:
+            self.state.gas -= 1
+
             completion: ChatCompletion = client.chat.completions.create(
-                model=self.params.model, messages=messages, tools=tools
+                model=self.params.model, messages=self.state.messages, tools=tools
             )
 
             if len(completion.choices) == 0:
@@ -96,7 +112,7 @@ class Agent:
                         )
                     )
 
-            messages.append(
+            self.state.messages.append(
                 ChatCompletionAssistantMessageParam(
                     role="assistant",
                     content=message.content,
@@ -104,13 +120,9 @@ class Agent:
                 )
             )
 
-            # TODO: process tool calls
             if message.tool_calls is not None:
                 for tool_call in message.tool_calls:
                     print(f"[tool_call]\n{tool_call.to_json()}\n")
-                    tool_call.function
-                    tool_call.function.name
-                    tool_call.function.arguments
                     if tool_call.function.name == "query_stackoverflow":
                         args = json.loads(tool_call.function.arguments)
                         query_string = args["query_string"]
@@ -143,10 +155,12 @@ class Agent:
                                 print("answer", answer)
                                 diagnostics.append(
                                     f"""
-# Question #{i + 1}
+# Question {i + 1}
+
+## Problem Statement
 {html.unescape(question['body_markdown'])}
 
-Answer: 
+## Solution
 {html.unescape(answer['body_markdown'])}
 """.strip()
                                 )
@@ -163,13 +177,15 @@ The following are the top question that matched the query, along with their acce
                         raise AgentException(
                             f"unrecognized tool_call function name: {tool_call.function.name}"
                         )
-                    # print(f"[tool_call]\n{tool_call_message}")
-                    messages.append(tool_call_message)
+                    self.state.messages.append(tool_call_message)
 
 
 if __name__ == "__main__":
-    agent = Agent(AgentParams(model="gpt-3.5-turbo", max_questions=1))
-    agent.run(
-        gas=1,
-        first_message='please seach StackExchange for stuff relating to "type hinting syntax"',
+    agent = Agent(
+        AgentParams(name="test", model="gpt-3.5-turbo", max_questions=1),
+        state=AgentState(
+            gas=1,
+            prompt='please seach StackExchange for stuff relating to "type hinting syntax"',
+        ),
     )
+    agent.run()
