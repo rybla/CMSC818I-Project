@@ -2,6 +2,7 @@ import os
 from dataclasses import dataclass
 import json
 import html
+from typing import Literal
 from pybughive import ProjectIssue, checkout_project_at_issue
 import stackexchange
 from openai.types.chat.chat_completion_message_tool_call import (
@@ -37,7 +38,6 @@ class AgentParams:
     model: ChatModel
     max_questions: int
     project_issue: ProjectIssue
-    prompt: str
     gas: int
 
 
@@ -75,7 +75,28 @@ class AgentAction:
 
 
 class ToolCallAgentAction(AgentAction):
-    pass
+    parameters: dict[str, tuple[type, dict[Literal["type", "description"], str]]]
+
+    def to_chat_completion_tool_param() -> ChatCompletionToolParam:
+        return ChatCompletionToolParam(
+            type="function",
+            function=FunctionDefinition(
+                name="query_stackoverflow",
+                description="Makes a query to StackOverflow for related questions and answers.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query_string": {
+                            "type": "string",
+                            "description": "The query string to send to StackOverflow. This should just be a space-separated list of the most important keywords rather than a fully-formed question.",
+                        }
+                    },
+                    "required": ["query_string"],
+                    "additionalProperties": False,
+                },
+                strict=True,
+            ),
+        )
 
 
 @dataclass
@@ -134,15 +155,17 @@ class Agent:
     transcript: list[AgentAction]
     gas: int
     main_convo: Conversation
+    splitter_convo: Conversation
 
     def __init__(self, params: AgentParams) -> None:
         self.params = params
         self.transcript = []
         self.gas = self.params.gas
+        prompt = ""  # TODO: prompt to start things off
         self.main_convo = Conversation(
             model=self.params.model,
             messages=[
-                ChatCompletionUserMessageParam(role="user", content=self.params.prompt),
+                ChatCompletionUserMessageParam(role="user", content=prompt),
             ],
             tools=[
                 ChatCompletionToolParam(
@@ -165,6 +188,9 @@ class Agent:
                     ),
                 )
             ],
+        )
+        self.splitter_convo = Conversation(
+            model=self.params.model, messages=[], tools=[]
         )
 
     def next_main_message(self, action: NextMainMessage) -> ChatCompletionMessage:
@@ -248,7 +274,6 @@ if __name__ == "__main__":
                 username="psf", repository="black", issue_index=0
             ),
             gas=1,
-            prompt='please seach StackExchange for stuff relating to "type hinting syntax"',
         ),
     )
     agent.run()
