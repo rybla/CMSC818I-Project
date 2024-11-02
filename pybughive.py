@@ -14,6 +14,9 @@ class ProjectIssue:
     repository: str
     issue_index: int
 
+    def get_directory(self):
+        return f"./repositories/{self.repository}"
+
 
 # def checkout_project_at_issue(username: str, repository: str, issue_index: int):
 def checkout_project_at_issue(project_issue: ProjectIssue):
@@ -43,7 +46,7 @@ def checkout_project_at_issue(project_issue: ProjectIssue):
         buggy_commit = issue["commits"][0]
         fixed_commit = issue["commits"][-1]
 
-        dir = f"./repositories/{project_issue.repository}"
+        dir = project_issue.get_directory()
         if not os.path.exists(dir):
             debug_log(f"cloning project into {dir}")
             subprocess.run(
