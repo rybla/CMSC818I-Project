@@ -1,8 +1,10 @@
 import os
+from abc import abstractmethod
 from dataclasses import dataclass
+import copy
 import json
 import html
-from typing import Literal
+from typing import Any, Literal, Self
 from pybughive import ProjectIssue, checkout_project_at_issue
 import stackexchange
 from openai.types.chat.chat_completion_message_tool_call import (
@@ -75,47 +77,60 @@ class AgentAction:
 
 
 class ToolCallAgentAction(AgentAction):
-    parameters: dict[str, tuple[type, dict[Literal["type", "description"], str]]]
+    tool_call_id: str
+    name: str
+    parameters: dict[str, dict[Literal["type", "description"], str]]
 
-    def to_chat_completion_tool_param() -> ChatCompletionToolParam:
+    def __init__(self, tool_call_id: str, args: dict[str, Any]) -> None:
+        super().__init__()
+        self.tool_call_id = tool_call_id
+        self.set_args(args)
+
+    @classmethod
+    def to_chat_completion_tool_param(cls) -> ChatCompletionToolParam:
         return ChatCompletionToolParam(
             type="function",
             function=FunctionDefinition(
-                name="query_stackoverflow",
+                name=cls.name,
                 description="Makes a query to StackOverflow for related questions and answers.",
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "query_string": {
-                            "type": "string",
-                            "description": "The query string to send to StackOverflow. This should just be a space-separated list of the most important keywords rather than a fully-formed question.",
-                        }
-                    },
-                    "required": ["query_string"],
+                    "properties": cls.parameters,
+                    "required": list(cls.parameters.keys()),
                     "additionalProperties": False,
                 },
                 strict=True,
             ),
         )
 
+    @classmethod
+    def from_tool_call(cls, tool_call: ChatCompletionMessageToolCall) -> Self:
+        args = json.loads(tool_call.function.arguments)
+        return cls(tool_call.id, args)
 
-@dataclass
+    @abstractmethod
+    def set_args(self, args: dict[str, Any]):
+        pass
+
+
 class QueryStackoverflow(ToolCallAgentAction):
     tag = "QueryStackoverflow"
-    tool_call_id: str
+    name = "query_stackoverflow"
+    parameters = {
+        "query_string": {
+            "type": "string",
+            "description": "The query string to send to StackOverflow. This should just be a space-separated list of the most important keywords rather than a fully-formed question.",
+        }
+    }
+
     query_string: str
+
+    def set_args(self, args: dict[str, Any]):
+        query_string = args["query_string"]
 
 
 class NextMainMessage(AgentAction):
     tag = "NextMainMessage"
-
-
-def from_tool_call_to_agent_tool_call_action(
-    tool_call: ChatCompletionMessageToolCall,
-) -> ToolCallAgentAction:
-    args = json.loads(tool_call.function.arguments)
-    query_string = args["query_string"]
-    return QueryStackoverflow(tool_call_id=tool_call.id, query_string=query_string)
 
 
 def from_tool_call_to_tool_call_param(
@@ -168,25 +183,7 @@ class Agent:
                 ChatCompletionUserMessageParam(role="user", content=prompt),
             ],
             tools=[
-                ChatCompletionToolParam(
-                    type="function",
-                    function=FunctionDefinition(
-                        name="query_stackoverflow",
-                        description="Makes a query to StackOverflow for related questions and answers.",
-                        parameters={
-                            "type": "object",
-                            "properties": {
-                                "query_string": {
-                                    "type": "string",
-                                    "description": "The query string to send to StackOverflow. This should just be a space-separated list of the most important keywords rather than a fully-formed question.",
-                                }
-                            },
-                            "required": ["query_string"],
-                            "additionalProperties": False,
-                        },
-                        strict=True,
-                    ),
-                )
+                QueryStackoverflow.to_chat_completion_tool_param(),
             ],
         )
         self.splitter_convo = Conversation(
@@ -258,7 +255,7 @@ The following are the top question that matched the query, along with their acce
             if message.tool_calls is not None:
                 for tool_call in message.tool_calls:
                     self.handle_tool_call_agent_action(
-                        from_tool_call_to_agent_tool_call_action(tool_call)
+                        ToolCallAgentAction.from_tool_call(tool_call)
                     )
             # TODO: agent decides what to do next
             pass
