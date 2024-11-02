@@ -2,6 +2,7 @@ import os
 from dataclasses import dataclass
 import json
 import html
+from pybughive import ProjectIssue
 import stackexchange
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.shared_params.function_definition import FunctionDefinition
@@ -30,6 +31,7 @@ class AgentParams:
     name: str
     model: ChatModel
     max_questions: int
+    project_issue: ProjectIssue
 
 
 class AgentState:
@@ -182,10 +184,18 @@ The following are the top question that matched the query, along with their acce
 
 if __name__ == "__main__":
     agent = Agent(
-        AgentParams(name="test", model="gpt-3.5-turbo", max_questions=1),
+        AgentParams(
+            name="test",
+            model="gpt-3.5-turbo",
+            max_questions=1,
+            project_issue=ProjectIssue(
+                username="psf", repository="black", issue_index=0
+            ),
+        ),
         state=AgentState(
             gas=1,
             prompt='please seach StackExchange for stuff relating to "type hinting syntax"',
         ),
     )
     agent.run()
+    pass
