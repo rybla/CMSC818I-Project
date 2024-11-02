@@ -18,8 +18,12 @@ class ProjectIssue:
         return f"./repositories/{self.repository}"
 
 
-# def checkout_project_at_issue(username: str, repository: str, issue_index: int):
 def checkout_project_at_issue(project_issue: ProjectIssue):
+    """
+    Clones the project repository if necessary. Then, change directory to local
+    clone of project repository, and checkout the commit corresponding to
+    _before_ the bug was fixed.
+    """
     debug_log(
         f"checking out project {project_issue.username}/{project_issue.repository} at issue {project_issue.issue_index}"
     )
