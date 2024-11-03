@@ -190,12 +190,18 @@ class Agent:
             model=self.params.model, messages=[], tools=[]
         )
 
-    def next_main_message(self, action: NextMainMessage) -> ChatCompletionMessage:
+    def transcribe_action(self, action: AgentAction):
         self.transcript.append(action)
+
+    def save_transcript(self):
+        raise Exception("TODO")
+
+    def next_main_message(self, action: NextMainMessage) -> ChatCompletionMessage:
+        self.transcribe_action(action)
         return self.main_convo.next_message()
 
     def handle_tool_call_agent_action(self, action: AgentAction):
-        self.transcript.append(action)
+        self.transcribe_action(action)
         if isinstance(action, QueryStackoverflow):
             # args = json.loads(tool_call.function.arguments)
             # query_string = args["query_string"]
@@ -259,6 +265,8 @@ The following are the top question that matched the query, along with their acce
                     )
             # TODO: agent decides what to do next
             pass
+
+        self.save_transcript()
 
 
 if __name__ == "__main__":
