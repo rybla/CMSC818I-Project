@@ -1,10 +1,12 @@
 import os
 from abc import abstractmethod
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import copy
 import json
 import html
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, TypeVar
+
+from openai import NOT_GIVEN
 from pybughive import ProjectIssue, checkout_project_at_issue
 import stackexchange
 from openai.types.chat.chat_completion_message_tool_call import (
@@ -30,6 +32,10 @@ from openai.types.chat.chat_completion_tool_message_param import (
 )
 from openai.types.chat_model import ChatModel
 from ai import client
+from utilities import debug_log
+import random
+
+random.seed()
 
 # ==============================================================================
 
@@ -72,63 +78,108 @@ class AgentException(Exception):
 # ==============================================================================
 
 
-class AgentAction:
-    tag: str
-
-
-class ToolCallAgentAction(AgentAction):
-    tool_call_id: str
+@dataclass
+class ToolTemplate:
     name: str
+    description: str
     parameters: dict[str, dict[Literal["type", "description"], str]]
 
-    def __init__(self, tool_call_id: str, args: dict[str, Any]) -> None:
-        super().__init__()
-        self.tool_call_id = tool_call_id
-        self.set_args(args)
-
-    @classmethod
-    def to_chat_completion_tool_param(cls) -> ChatCompletionToolParam:
+    def to_chat_completion_tool_param(self) -> ChatCompletionToolParam:
         return ChatCompletionToolParam(
             type="function",
             function=FunctionDefinition(
-                name=cls.name,
-                description="Makes a query to StackOverflow for related questions and answers.",
+                name=self.name,
+                description=self.description,
                 parameters={
                     "type": "object",
-                    "properties": cls.parameters,
-                    "required": list(cls.parameters.keys()),
+                    "properties": self.parameters,
+                    "required": list(self.parameters.keys()),
                     "additionalProperties": False,
                 },
                 strict=True,
             ),
         )
 
-    @classmethod
-    def from_tool_call(cls, tool_call: ChatCompletionMessageToolCall) -> Self:
-        args = json.loads(tool_call.function.arguments)
-        return cls(tool_call.id, args)
 
-    @abstractmethod
-    def set_args(self, args: dict[str, Any]):
-        pass
+class ToolClass:
+    template: ToolTemplate
 
 
-class QueryStackoverflow(ToolCallAgentAction):
-    tag = "QueryStackoverflow"
-    name = "query_stackoverflow"
-    parameters = {
+all_tool_classes: list[ToolClass] = []
+
+
+class ToolMeta(type):
+    def __new__(cls, cls_name, cls_bases, cls_dict):
+        # assert ToolClass in cls_bases
+        # print("cls_bases", cls_bases)
+        # assert isinstance(cls, ToolClass)
+        all_tool_classes.append(cls)  # type: ignore
+        # print(cls_dict)
+        template: ToolTemplate = cls_dict["template"]
+        template_parameter_keys = set(template.parameters.keys())
+        class_annotation_keys = set(cls_dict["__annotations__"].keys())
+        if not template_parameter_keys == class_annotation_keys:
+            raise Exception(
+                f"""
+Mismatch in ToolMeta template parameters and class annotations:
+  - template parameters : {template_parameter_keys}
+  - class annotations   : {class_annotation_keys}
+""".strip()
+            )
+        super().__new__(cls, cls_name, cls_bases, cls_dict)
+
+
+query_stackoverflow = ToolTemplate(
+    name="query_stackoverflow",
+    description="Query StackOver for related questions and answers.",
+    parameters={
         "query_string": {
             "type": "string",
-            "description": "The query string to send to StackOverflow. This should just be a space-separated list of the most important keywords rather than a fully-formed question.",
+            "description": "The query string to send to StackOverflow. This should just be a concise collection of the most relevant keywords.",
         }
-    }
+    },
+)
+
+
+# ==============================================================================
+
+
+class AgentAction:
+    tag: str
+
+
+class ToolCallAgentAction(AgentAction, ToolClass):
+    template: ToolTemplate
+    tool_call_id: str
+
+    @classmethod
+    def from_ChatCompletionMessageToolCall(
+        cls, tool_call: ChatCompletionMessageToolCall
+    ):
+        for tool_class in all_tool_classes:
+            function = tool_call.function
+            if tool_class.template.name == function.name:
+                return cls(**json.loads(function.arguments))
+        raise Exception(f'unrecognized tool call with function name: "{function.name}"')
+
+
+@dataclass
+class QueryStackOverflow(ToolCallAgentAction, metaclass=ToolMeta):
+    template = ToolTemplate(
+        name="query_stackoverflow",
+        description="Query StackOver for related questions and answers.",
+        parameters={
+            "query_string": {
+                "type": "string",
+                "description": "The query string to send to StackOverflow. This should just be a concise collection of the most relevant keywords.",
+            }
+        },
+    )
 
     query_string: str
 
-    def set_args(self, args: dict[str, Any]):
-        query_string = args["query_string"]
 
-
+@dataclass
 class NextMainMessage(AgentAction):
     tag = "NextMainMessage"
 
@@ -155,7 +206,9 @@ class Conversation:
 
     def next_message(self) -> ChatCompletionMessage:
         completion = client.chat.completions.create(
-            model=self.model, messages=self.messages, tools=self.tools
+            model=self.model,
+            messages=self.messages,
+            tools=NOT_GIVEN if len(self.tools) == 0 else self.tools,
         )
 
         if len(completion.choices) == 0:
@@ -176,14 +229,17 @@ class Agent:
         self.params = params
         self.transcript = []
         self.gas = self.params.gas
-        prompt = ""  # TODO: prompt to start things off
+        # TODO: actual prompt
+        prompt = """
+Search StackOverflow for how to use type hints in Python.
+""".strip()
         self.main_convo = Conversation(
             model=self.params.model,
             messages=[
                 ChatCompletionUserMessageParam(role="user", content=prompt),
             ],
             tools=[
-                QueryStackoverflow.to_chat_completion_tool_param(),
+                QueryStackOverflow.template.to_chat_completion_tool_param(),
             ],
         )
         self.splitter_convo = Conversation(
@@ -194,17 +250,21 @@ class Agent:
         self.transcript.append(action)
 
     def save_transcript(self):
-        raise Exception("TODO")
+        r = round(random.random() * 10000)
+        transcript_filename = f"transcripts/{self.params.name}_{str(r)}.json"
+        debug_log(f"writing transcript to file: {transcript_filename}")
+        json.dump(
+            [asdict(action) for action in self.transcript],  # type: ignore
+            open(f"../../{transcript_filename}", "w+"),
+        )
 
     def next_main_message(self, action: NextMainMessage) -> ChatCompletionMessage:
         self.transcribe_action(action)
         return self.main_convo.next_message()
 
-    def handle_tool_call_agent_action(self, action: AgentAction):
+    def handle_tool_call_agent_action(self, action: ToolCallAgentAction):
         self.transcribe_action(action)
-        if isinstance(action, QueryStackoverflow):
-            # args = json.loads(tool_call.function.arguments)
-            # query_string = args["query_string"]
+        if isinstance(action, QueryStackOverflow):
             query_string = action.query_string
             question_list = stackexchange.query_questions(query_string)["items"]
             if len(question_list) == 0:
@@ -258,11 +318,12 @@ The following are the top question that matched the query, along with their acce
         while self.gas > 0:
             self.gas -= 1
             message = self.next_main_message(NextMainMessage())
-            if message.tool_calls is not None:
-                for tool_call in message.tool_calls:
-                    self.handle_tool_call_agent_action(
-                        ToolCallAgentAction.from_tool_call(tool_call)
-                    )
+            debug_log(f"message.tool_calls: {str(message.tool_calls)}")
+            # if message.tool_calls is not None:
+            for tool_call in message.tool_calls or []:
+                self.handle_tool_call_agent_action(
+                    ToolCallAgentAction.from_ChatCompletionMessageToolCall(tool_call)
+                )
             # TODO: agent decides what to do next
             pass
 
