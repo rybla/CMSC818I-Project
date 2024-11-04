@@ -152,7 +152,7 @@ class ToolCallAgentAction(AgentAction, ToolClass):
 
     @classmethod
     def from_ChatCompletionMessageToolCall(
-        cls: type[Cls], tool_call: ChatCompletionMessageToolCall
+        cls, tool_call: ChatCompletionMessageToolCall
     ) -> Cls:
         for tool_class in all_tool_classes:
             function = tool_call.function
