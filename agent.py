@@ -334,6 +334,7 @@ if __name__ == "__main__":
         AgentParams(
             name="test",
             model="gpt-3.5-turbo",
+            # model="gpt-4-turbo",
             max_questions=1,
             project_issue=ProjectIssue(
                 username="psf", repository="black", issue_index=0
