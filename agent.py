@@ -37,6 +37,9 @@ import random
 
 random.seed()
 
+Cls = TypeVar("Cls")
+
+
 # ==============================================================================
 
 
@@ -105,28 +108,23 @@ class ToolClass:
     template: ToolTemplate
 
 
-all_tool_classes: list[ToolClass] = []
+all_tool_classes: list[type[ToolClass]] = []
 
 
-class ToolMeta(type):
-    def __new__(cls, cls_name, cls_bases, cls_dict):
-        # assert ToolClass in cls_bases
-        # print("cls_bases", cls_bases)
-        # assert isinstance(cls, ToolClass)
-        all_tool_classes.append(cls)  # type: ignore
-        # print(cls_dict)
-        template: ToolTemplate = cls_dict["template"]
-        template_parameter_keys = set(template.parameters.keys())
-        class_annotation_keys = set(cls_dict["__annotations__"].keys())
-        if not template_parameter_keys == class_annotation_keys:
-            raise Exception(
-                f"""
+def toolclass(cls):
+    all_tool_classes.append(cls)
+    template: ToolTemplate = cls.template
+    template_parameter_keys = set(template.parameters.keys())
+    class_annotation_keys = set(cls.__annotations__.keys())
+    if not template_parameter_keys == class_annotation_keys:
+        raise Exception(
+            f"""
 Mismatch in ToolMeta template parameters and class annotations:
   - template parameters : {template_parameter_keys}
   - class annotations   : {class_annotation_keys}
 """.strip()
-            )
-        super().__new__(cls, cls_name, cls_bases, cls_dict)
+        )
+    return cls
 
 
 query_stackoverflow = ToolTemplate(
@@ -154,8 +152,8 @@ class ToolCallAgentAction(AgentAction, ToolClass):
 
     @classmethod
     def from_ChatCompletionMessageToolCall(
-        cls, tool_call: ChatCompletionMessageToolCall
-    ):
+        cls: type[Cls], tool_call: ChatCompletionMessageToolCall
+    ) -> Cls:
         for tool_class in all_tool_classes:
             function = tool_call.function
             if tool_class.template.name == function.name:
@@ -164,7 +162,8 @@ class ToolCallAgentAction(AgentAction, ToolClass):
 
 
 @dataclass
-class QueryStackOverflow(ToolCallAgentAction, metaclass=ToolMeta):
+@toolclass
+class QueryStackOverflow(ToolCallAgentAction):
     template = ToolTemplate(
         name="query_stackoverflow",
         description="Query StackOver for related questions and answers.",
