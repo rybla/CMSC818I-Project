@@ -40,6 +40,10 @@ random.seed()
 Cls = TypeVar("Cls")
 
 
+def asdict_super(x):
+    return dict((k, getattr(x, k)) for k in dir(x) if not k.startswith("_"))
+
+
 # ==============================================================================
 
 
@@ -104,18 +108,20 @@ class ToolTemplate:
         )
 
 
-class ToolClass:
+@dataclass
+class ToolUse:
     template: ToolTemplate
 
 
-all_tool_classes: list[type[ToolClass]] = []
+all_tool_use_classes: list[type[ToolUse]] = []
 
 
 def toolclass(cls):
-    all_tool_classes.append(cls)
+    all_tool_use_classes.append(cls)
     template: ToolTemplate = cls.template
     template_parameter_keys = set(template.parameters.keys())
     class_annotation_keys = set(cls.__annotations__.keys())
+
     if not template_parameter_keys == class_annotation_keys:
         raise Exception(
             f"""
@@ -143,27 +149,29 @@ query_stackoverflow = ToolTemplate(
 
 
 class AgentAction:
-    tag: str
+    _tag: str
 
 
-class ToolCallAgentAction(AgentAction, ToolClass):
-    template: ToolTemplate
+@dataclass
+class ToolUseAgentAction(AgentAction):
+    tag = "ToolUse"
     tool_call_id: str
+    _tool_use: ToolUse
 
-    @classmethod
-    def from_ChatCompletionMessageToolCall(
-        cls, tool_call: ChatCompletionMessageToolCall
-    ) -> Cls:
-        for tool_class in all_tool_classes:
-            function = tool_call.function
-            if tool_class.template.name == function.name:
-                return cls(**json.loads(function.arguments))
-        raise Exception(f'unrecognized tool call with function name: "{function.name}"')
+
+def from_ChatCompletionMessageToolCall_to_ToolUse(
+    tool_call: ChatCompletionMessageToolCall,
+) -> ToolUse:
+    for tool_use in all_tool_use_classes:
+        function = tool_call.function
+        if tool_use.template.name == function.name:
+            return tool_use(tool_use.template, **json.loads(function.arguments))
+    raise Exception(f'unrecognized tool call with function name: "{function.name}"')
 
 
 @dataclass
 @toolclass
-class QueryStackOverflow(ToolCallAgentAction):
+class QueryStackOverflow(ToolUse):
     template = ToolTemplate(
         name="query_stackoverflow",
         description="Query StackOver for related questions and answers.",
@@ -180,7 +188,13 @@ class QueryStackOverflow(ToolCallAgentAction):
 
 @dataclass
 class NextMainMessage(AgentAction):
-    tag = "NextMainMessage"
+    _tag = "NextMainMessage"
+
+
+@dataclass
+class MainToolMessage(AgentAction):
+    _tag = "MainToolMessage"
+    msg: ChatCompletionToolMessageParam
 
 
 def from_tool_call_to_tool_call_param(
@@ -249,11 +263,20 @@ Search StackOverflow for how to use type hints in Python.
         self.transcript.append(action)
 
     def save_transcript(self):
-        r = round(random.random() * 10000)
-        transcript_filename = f"transcripts/{self.params.name}_{str(r)}.json"
+        n = len(
+            list(
+                filter(
+                    lambda fn: fn.startswith(self.params.name),
+                    os.listdir("../../transcripts/"),
+                ),
+            )
+        )
+        transcript_filename = f"transcripts/{self.params.name}_{str(n)}.json"
         debug_log(f"writing transcript to file: {transcript_filename}")
+        for action in self.transcript:
+            print(asdict_super(action))
         json.dump(
-            [asdict(action) for action in self.transcript],  # type: ignore
+            [asdict_super(action) for action in self.transcript],
             open(f"../../{transcript_filename}", "w+"),
         )
 
@@ -261,10 +284,14 @@ Search StackOverflow for how to use type hints in Python.
         self.transcribe_action(action)
         return self.main_convo.next_message()
 
-    def handle_tool_call_agent_action(self, action: ToolCallAgentAction):
+    def append_main_tool_message(self, msg: ChatCompletionToolMessageParam):
+        self.transcribe_action(MainToolMessage(msg))
+        self.main_convo.messages.append(msg)
+
+    def handle_tool_call_agent_action(self, action: ToolUseAgentAction):
         self.transcribe_action(action)
-        if isinstance(action, QueryStackOverflow):
-            query_string = action.query_string
+        if isinstance(action._tool_use, QueryStackOverflow):
+            query_string = action._tool_use.query_string
             question_list = stackexchange.query_questions(query_string)["items"]
             if len(question_list) == 0:
                 tool_call_message = ChatCompletionToolMessageParam(
@@ -288,28 +315,29 @@ Search StackOverflow for how to use type hints in Python.
                     print("answer", answer)
                     diagnostics.append(
                         f"""
-# Question {i + 1}
+    # Question {i + 1}
 
-## Problem Statement
-{html.unescape(question['body_markdown'])}
+    ## Problem Statement
+    {html.unescape(question['body_markdown'])}
 
-## Solution
-{html.unescape(answer['body_markdown'])}
-""".strip()
+    ## Solution
+    {html.unescape(answer['body_markdown'])}
+    """.strip()
                     )
                 content = f"""
-The following are the top question that matched the query, along with their accepted answers. 
+    The following are the top question that matched the query, along with their accepted answers. 
 
-{"\n\n".join(diagnostics)}
-""".strip()
+    {"\n\n".join(diagnostics)}
+    """.strip()
                 print(f"[diagnostics]\n{"\n\n".join(diagnostics)}")
-                self.main_convo.messages.append(
+
+                self.append_main_tool_message(
                     ChatCompletionToolMessageParam(
-                        content=content, role="tool", tool_call_id=action.tool_call_id
+                        content=content,
+                        role="tool",
+                        tool_call_id=action.tool_call_id,
                     )
                 )
-        else:
-            raise Exception(f"unhandled AgentAction with tag: {action.tag}")
 
     def run(self):
         checkout_project_at_issue(self.params.project_issue)
@@ -321,7 +349,12 @@ The following are the top question that matched the query, along with their acce
             # if message.tool_calls is not None:
             for tool_call in message.tool_calls or []:
                 self.handle_tool_call_agent_action(
-                    ToolCallAgentAction.from_ChatCompletionMessageToolCall(tool_call)
+                    ToolUseAgentAction(
+                        tool_call_id=tool_call.id,
+                        _tool_use=from_ChatCompletionMessageToolCall_to_ToolUse(
+                            tool_call
+                        ),
+                    )
                 )
             # TODO: agent decides what to do next
             pass

@@ -4,3 +4,4 @@
 repositories/
 venv/
 __pycache__
+.pyc
