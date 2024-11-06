@@ -1,13 +1,20 @@
+import ast
 import os
 from abc import abstractmethod
 from dataclasses import asdict, dataclass
 import copy
 import json
 import html
+import subprocess
 from typing import Any, Literal, Self, TypeVar
 
 from openai import NOT_GIVEN
-from pybughive import ProjectIssue, checkout_project_at_issue
+from pybughive import (
+    DiffBlock,
+    ProjectIssue,
+    checkout_project_at_issue,
+    project_issue_diff_blocks,
+)
 import stackexchange
 from openai.types.chat.chat_completion_message_tool_call import (
     ChatCompletionMessageToolCall,
@@ -24,6 +31,9 @@ from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_assistant_message_param import (
     ChatCompletionAssistantMessageParam,
 )
+from openai.types.chat.chat_completion_system_message_param import (
+    ChatCompletionSystemMessageParam,
+)
 from openai.types.chat.chat_completion_user_message_param import (
     ChatCompletionUserMessageParam,
 )
@@ -32,7 +42,7 @@ from openai.types.chat.chat_completion_tool_message_param import (
 )
 from openai.types.chat_model import ChatModel
 from ai import client
-from utilities import debug_log
+from utilities import debug_log, find_innermost_scope
 import random
 
 random.seed()
@@ -59,24 +69,6 @@ class AgentParams:
 # ==============================================================================
 
 
-# class AgentState:
-#     gas: int
-#     prompt: str
-#     messages: list[ChatCompletionMessageParam]
-
-#     def __init__(
-#         self,
-#         gas: int,
-#         prompt: str,
-#     ):
-#         self.gas = gas
-#         self.prompt = prompt
-#         self.messages = [ChatCompletionUserMessageParam(role="user", content=prompt)]
-
-
-# ==============================================================================
-
-
 class AgentException(Exception):
     def __init__(self, message: str) -> None:
         super().__init__(message)
@@ -89,7 +81,7 @@ class AgentException(Exception):
 class ToolTemplate:
     name: str
     description: str
-    parameters: dict[str, dict[Literal["type", "description"], str]]
+    parameters: dict[str, Any]
 
     def to_chat_completion_tool_param(self) -> ChatCompletionToolParam:
         return ChatCompletionToolParam(
@@ -101,6 +93,7 @@ class ToolTemplate:
                     "type": "object",
                     "properties": self.parameters,
                     "required": list(self.parameters.keys()),
+                    "strict": True,
                     "additionalProperties": False,
                 },
                 strict=True,
@@ -171,6 +164,24 @@ def from_ChatCompletionMessageToolCall_to_ToolUse(
 
 @dataclass
 @toolclass
+class EnumerateBugs(ToolUse):
+    template = ToolTemplate(
+        name="enumerate_potential_bugs",
+        description="",
+        parameters={
+            "potential_bugs": {
+                "type": "array",
+                "description": "TODO",
+                "items": {"type": "string"},
+            }
+        },
+    )
+
+    potential_bugs: list[str]
+
+
+@dataclass
+@toolclass
 class QueryStackOverflow(ToolUse):
     template = ToolTemplate(
         name="query_stackoverflow",
@@ -189,6 +200,18 @@ class QueryStackOverflow(ToolUse):
 @dataclass
 class NextMainMessage(AgentAction):
     _tag = "NextMainMessage"
+
+
+@dataclass
+class AppendMainMessage(AgentAction):
+    _tag = "AppendMainMessage"
+    msg: ChatCompletionUserMessageParam
+
+
+@dataclass
+class EnumeratePotentialBugsMessage(AgentAction):
+    _tag = "AppendEnumeratorMessage"
+    msg: ChatCompletionUserMessageParam
 
 
 @dataclass
@@ -216,6 +239,7 @@ class Conversation:
     model: ChatModel
     messages: list[ChatCompletionMessageParam]
     tools: list[ChatCompletionToolParam]
+    cumulative: bool
 
     def next_message(self) -> ChatCompletionMessage:
         completion = client.chat.completions.create(
@@ -228,6 +252,13 @@ class Conversation:
             raise AgentException("len(completion.choices) == 0")
         choice = completion.choices[0]
 
+        if self.cumulative:
+            self.messages.append(
+                ChatCompletionMessageParam(
+                    content=choice.message.content, role=choice.message.role
+                )
+            )
+
         return choice.message
 
 
@@ -236,7 +267,7 @@ class Agent:
     transcript: list[AgentAction]
     gas: int
     main_convo: Conversation
-    splitter_convo: Conversation
+    enumerator_convo: Conversation
 
     def __init__(self, params: AgentParams) -> None:
         self.params = params
@@ -254,13 +285,21 @@ Search StackOverflow for how to use type hints in Python.
             tools=[
                 QueryStackOverflow.template.to_chat_completion_tool_param(),
             ],
+            cumulative=True,
         )
-        self.splitter_convo = Conversation(
-            model=self.params.model, messages=[], tools=[]
+        self.enumerator_convo = Conversation(
+            model=self.params.model,
+            messages=[ChatCompletionSystemMessageParam(role="system", content=prompt)],
+            tools=[EnumerateBugs.template.to_chat_completion_tool_param()],
+            cumulative=False,
         )
 
     def transcribe_action(self, action: AgentAction):
         self.transcript.append(action)
+        self.gas -= 1
+        if self.gas == 0:
+            self.save_transcript()
+            raise Exception("ran out of gas")
 
     def save_transcript(self):
         n = len(
@@ -280,9 +319,28 @@ Search StackOverflow for how to use type hints in Python.
             open(f"../../{transcript_filename}", "w+"),
         )
 
+    def enumerate_potential_bugs(self, action: EnumeratePotentialBugsMessage):
+        self.transcribe_action(action)
+        self.enumerator_convo.messages.append(action.msg)
+        message = self.enumerator_convo.next_message()
+        for tool_call in message.tool_calls if message.tool_calls is not None else []:
+            tooluse_action = ToolUseAgentAction(
+                tool_call_id=tool_call.id,
+                _tool_use=from_ChatCompletionMessageToolCall_to_ToolUse(tool_call),
+            )
+            self.transcribe_action(tooluse_action)
+            if isinstance(tooluse_action, EnumerateBugs):
+                raise Exception("TODO")
+            else:
+                raise Exception("enumerator_convo should use only tool EnumerateBugs")
+
     def next_main_message(self, action: NextMainMessage) -> ChatCompletionMessage:
         self.transcribe_action(action)
         return self.main_convo.next_message()
+
+    def append_main_message(self, action: AppendMainMessage):
+        self.transcribe_action(action)
+        self.main_convo.messages.append(action.msg)
 
     def append_main_tool_message(self, msg: ChatCompletionToolMessageParam):
         self.transcribe_action(MainToolMessage(msg))
@@ -315,49 +373,92 @@ Search StackOverflow for how to use type hints in Python.
                     print("answer", answer)
                     diagnostics.append(
                         f"""
-    # Question {i + 1}
+# Question {i + 1}
 
-    ## Problem Statement
-    {html.unescape(question['body_markdown'])}
+## Problem Statement
+{html.unescape(question['body_markdown'])}
 
-    ## Solution
-    {html.unescape(answer['body_markdown'])}
-    """.strip()
+## Solution
+{html.unescape(answer['body_markdown'])}
+""".strip()
                     )
                 content = f"""
-    The following are the top question that matched the query, along with their accepted answers. 
+The following are the top question that matched the query, along with their accepted answers. 
 
-    {"\n\n".join(diagnostics)}
+{"\n\n".join(diagnostics)}
     """.strip()
                 print(f"[diagnostics]\n{"\n\n".join(diagnostics)}")
 
-                self.append_main_tool_message(
-                    ChatCompletionToolMessageParam(
-                        content=content,
-                        role="tool",
-                        tool_call_id=action.tool_call_id,
-                    )
+                tool_call_message = ChatCompletionToolMessageParam(
+                    content=content,
+                    role="tool",
+                    tool_call_id=action.tool_call_id,
                 )
+
+            self.append_main_tool_message(tool_call_message)
 
     def run(self):
+        global innermost
         checkout_project_at_issue(self.params.project_issue)
+        diff_blocks = project_issue_diff_blocks(self.params.project_issue)
+        diff_blocks_pp_buggy: list[tuple[DiffBlock, str]] = []
+        for diff_block in diff_blocks:
+            source_file = diff_block.patched_file.source_file.strip("a/")
 
-        while self.gas > 0:
-            self.gas -= 1
-            message = self.next_main_message(NextMainMessage())
-            debug_log(f"message.tool_calls: {str(message.tool_calls)}")
-            # if message.tool_calls is not None:
-            for tool_call in message.tool_calls or []:
-                self.handle_tool_call_agent_action(
-                    ToolUseAgentAction(
-                        tool_call_id=tool_call.id,
-                        _tool_use=from_ChatCompletionMessageToolCall_to_ToolUse(
-                            tool_call
-                        ),
-                    )
+            # only care about changes in python files
+            if not source_file.endswith(".py"):
+                continue
+
+            with open(source_file, "r") as f:
+                tree = ast.parse(f.read())
+
+            source_line_range, _ = diff_block.line_ranges()
+            innermost = find_innermost_scope(tree, source_line_range[0])
+            if innermost is None:
+                raise Exception("failed to find innermost class or function scope")
+            else:
+                innermost_pp = ast.unparse(innermost)
+                diff_blocks_pp_buggy.append((diff_block, innermost_pp))
+
+        diff_block_pp_s = "\n\n".join(
+            [
+                f"""
+file: {diff_block.patched_file.source_file.strip("a/")}
+```
+{innermost_pp}
+```
+                """.strip()
+                for (diff_block, innermost_pp) in diff_blocks_pp_buggy
+            ]
+        )
+
+        self.enumerate_potential_bugs(
+            EnumeratePotentialBugsMessage(
+                ChatCompletionUserMessageParam(
+                    role="user",
+                    content=f"""
+Consider the following Python code from various files in a project.
+
+{diff_block_pp_s}
+
+These files exist in a larger project that you don't have access to, but try to infer what that context would probably be in order to make sense of this code that you do have access to.
+
+Now, use the "enumerate_potential_bugs" tool to enumerate the most likely potential bugs that could be present in the sections of code you've been presented with above.
+Note that there may be NO bugs, or at most A FEW bugs (1-3) bugs.
+""".strip(),
                 )
-            # TODO: agent decides what to do next
-            pass
+            )
+        )
+        message = self.next_main_message(NextMainMessage())
+        debug_log(f"message.tool_calls: {str(message.tool_calls)}")
+        for tool_call in message.tool_calls if message.tool_calls is not None else []:
+            self.handle_tool_call_agent_action(
+                ToolUseAgentAction(
+                    tool_call_id=tool_call.id,
+                    _tool_use=from_ChatCompletionMessageToolCall_to_ToolUse(tool_call),
+                )
+            )
+        # TODO: agent decides what to do next
 
         self.save_transcript()
 
