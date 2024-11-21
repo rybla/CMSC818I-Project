@@ -369,8 +369,8 @@ Search StackOverflow for how to use type hints in Python.
                 answer_list = stackexchange.get_answers_by_ids(answer_id_list)["items"]
 
                 for i, (question, answer) in enumerate(zip(question_list, answer_list)):
-                    print("question", question)
-                    print("answer", answer)
+                    # print("question", question)
+                    # print("answer", answer)
                     diagnostics.append(
                         f"""
 # Question {i + 1}
@@ -387,7 +387,7 @@ The following are the top question that matched the query, along with their acce
 
 {"\n\n".join(diagnostics)}
     """.strip()
-                print(f"[diagnostics]\n{"\n\n".join(diagnostics)}")
+                # debug_log(f"[diagnostics]\n{"\n\n".join(diagnostics)}")
 
                 tool_call_message = ChatCompletionToolMessageParam(
                     content=content,
@@ -403,17 +403,19 @@ The following are the top question that matched the query, along with their acce
         diff_blocks = project_issue_diff_blocks(self.params.project_issue)
         diff_blocks_pp_buggy: list[tuple[DiffBlock, str]] = []
         for diff_block in diff_blocks:
+            source_line_range, _ = diff_block.line_ranges()
             source_file = diff_block.patched_file.source_file.strip("a/")
 
             # only care about changes in python files
             if not source_file.endswith(".py"):
                 continue
 
+            debug_log(f"extracting diff block from {source_file}")
             with open(source_file, "r") as f:
-                tree = ast.parse(f.read())
+                source = f.read()
+                tree = ast.parse(source)
 
-            source_line_range, _ = diff_block.line_ranges()
-            innermost = find_innermost_scope(tree, source_line_range[0])
+            innermost = find_innermost_scope(tree, source_line_range)
             if innermost is None:
                 raise Exception("failed to find innermost class or function scope")
             else:
@@ -444,7 +446,7 @@ Consider the following Python code from various files in a project.
 These files exist in a larger project that you don't have access to, but try to infer what that context would probably be in order to make sense of this code that you do have access to.
 
 Now, use the "enumerate_potential_bugs" tool to enumerate the most likely potential bugs that could be present in the sections of code you've been presented with above.
-Note that there may be NO bugs, or at most A FEW bugs (1-3) bugs.
+Note that there may be NO bugs, or at most A FEW (around 1-3) bugs.
 """.strip(),
                 )
             )
@@ -473,7 +475,7 @@ if __name__ == "__main__":
             project_issue=ProjectIssue(
                 username="psf", repository="black", issue_index=0
             ),
-            gas=1,
+            gas=10,
         ),
     )
     agent.run()
