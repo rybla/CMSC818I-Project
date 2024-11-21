@@ -8,8 +8,10 @@ from unidiff import PatchSet, PatchedFile
 
 from utilities import debug_log
 
+repository_path = "/users/henry/Documents/CMSC818I-Project/"
+
 pybughive_dataset_filename = (
-    "/users/henry/Documents/cmsc818I/project/pybughive/dataset/pybughive_current.json"
+    f"{repository_path}pybughive/dataset/pybughive_current.json"
 )
 
 
