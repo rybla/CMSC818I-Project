@@ -13,7 +13,7 @@ def find_innermost_scope(tree, line_range: tuple[int, int]):
     Finds the innermost function or class definition that encloses a given line number.
     """
 
-    innermost = tree
+    innermost = None
     for node in ast.walk(tree):
         if (
             isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.stmt))
@@ -21,7 +21,7 @@ def find_innermost_scope(tree, line_range: tuple[int, int]):
                 node.lineno <= line_range[0]
                 and (
                     line_range[1] <= node.end_lineno
-                    if node.end_lineno is not None
+                    if isinstance(node.end_lineno, int)
                     else True
                 )
             )
@@ -29,7 +29,8 @@ def find_innermost_scope(tree, line_range: tuple[int, int]):
                 (
                     innermost.lineno < node.lineno
                     and node.end_lineno < innermost.end_lineno
-                    if node.end_lineno is not None and innermost.end_lineno is not None
+                    if isinstance(node.end_lineno, int)
+                    and isinstance(innermost.end_lineno, int)
                     else False
                 )
                 if innermost is not None
@@ -37,4 +38,4 @@ def find_innermost_scope(tree, line_range: tuple[int, int]):
             )
         ):
             innermost = node
-    return innermost
+    return innermost if innermost is not None else tree

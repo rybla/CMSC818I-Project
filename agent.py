@@ -151,6 +151,9 @@ class ToolUseAgentAction(AgentAction):
     tool_call_id: str
     _tool_use: ToolUse
 
+    def __str__(self):
+        return f"ToolUseAgentAction({self._tool_use.template.name}, ...)"
+
 
 def from_ChatCompletionMessageToolCall_to_ToolUse(
     tool_call: ChatCompletionMessageToolCall,
@@ -179,6 +182,9 @@ class EnumerateBugs(ToolUse):
 
     potential_bugs: list[str]
 
+    def __str__(self):
+        return f"EnumerateBugs(...)"
+
 
 @dataclass
 @toolclass
@@ -196,10 +202,16 @@ class QueryStackOverflow(ToolUse):
 
     query_string: str
 
+    def __str__(self):
+        return "QueryStackOverflow(...)"
+
 
 @dataclass
 class NextMainMessage(AgentAction):
     _tag = "NextMainMessage"
+
+    def __str__(self):
+        return "NextMainMessage(...)"
 
 
 @dataclass
@@ -207,17 +219,26 @@ class AppendMainMessage(AgentAction):
     _tag = "AppendMainMessage"
     msg: ChatCompletionUserMessageParam
 
+    def __str__(self):
+        return "AppendMainMessage(...)"
+
 
 @dataclass
 class EnumeratePotentialBugsMessage(AgentAction):
     _tag = "AppendEnumeratorMessage"
     msg: ChatCompletionUserMessageParam
 
+    def __str__(self):
+        return "EnumeratePotentialBugsMessage(...)"
+
 
 @dataclass
 class MainToolMessage(AgentAction):
     _tag = "MainToolMessage"
     msg: ChatCompletionToolMessageParam
+
+    def __str__(self):
+        return "MainToolMessage"
 
 
 def from_tool_call_to_tool_call_param(
@@ -295,6 +316,7 @@ Search StackOverflow for how to use type hints in Python.
         )
 
     def transcribe_action(self, action: AgentAction):
+        debug_log(f"[action] {str(action)}")
         self.transcript.append(action)
         self.gas -= 1
         if self.gas == 0:
@@ -329,10 +351,12 @@ Search StackOverflow for how to use type hints in Python.
                 _tool_use=from_ChatCompletionMessageToolCall_to_ToolUse(tool_call),
             )
             self.transcribe_action(tooluse_action)
-            if isinstance(tooluse_action, EnumerateBugs):
+            if isinstance(tooluse_action._tool_use, EnumerateBugs):
                 raise Exception("TODO")
             else:
-                raise Exception("enumerator_convo should use only tool EnumerateBugs")
+                raise Exception(
+                    f"enumerator_convo should use only tool EnumerateBugs: {tooluse_action._tool_use}"
+                )
 
     def next_main_message(self, action: NextMainMessage) -> ChatCompletionMessage:
         self.transcribe_action(action)
