@@ -15,6 +15,7 @@ from pybughive import (
     checkout_project_at_issue,
     project_issue_diff_blocks,
 )
+import pybughive
 import stackexchange
 from openai.types.chat.chat_completion_message_tool_call import (
     ChatCompletionMessageToolCall,
@@ -174,7 +175,7 @@ class EnumerateBugs(ToolUse):
         parameters={
             "potential_bugs": {
                 "type": "array",
-                "description": "TODO",
+                "description": "Array of potential bugs. Each item is a concise description of a single potential bug, and explicitly references the points of the source code that the bug manifests in.",
                 "items": {"type": "string"},
             }
         },
@@ -217,7 +218,7 @@ class NextMainMessage(AgentAction):
 @dataclass
 class AppendMainMessage(AgentAction):
     _tag = "AppendMainMessage"
-    msg: ChatCompletionUserMessageParam
+    msg: ChatCompletionMessageParam
 
     def __str__(self):
         return "AppendMainMessage(...)"
@@ -276,7 +277,7 @@ class Conversation:
         if self.cumulative:
             self.messages.append(
                 ChatCompletionMessageParam(
-                    content=choice.message.content, role=choice.message.role
+                    role=choice.message.role, content=choice.message.content
                 )
             )
 
@@ -295,13 +296,15 @@ class Agent:
         self.transcript = []
         self.gas = self.params.gas
         # TODO: actual prompt
-        prompt = """
-Search StackOverflow for how to use type hints in Python.
-""".strip()
         self.main_convo = Conversation(
             model=self.params.model,
             messages=[
-                ChatCompletionUserMessageParam(role="user", content=prompt),
+                ChatCompletionSystemMessageParam(
+                    role="system",
+                    content="""
+You are an expert assistant for identifying bugs in Python programs. You have access to a few tools to help you gather extra contextual information about programming topics or questions about the program at hand. You are very conscious of minimizing your false positive rate in identifying bugs.
+""".strip(),
+                ),
             ],
             tools=[
                 QueryStackOverflow.template.to_chat_completion_tool_param(),
@@ -310,7 +313,14 @@ Search StackOverflow for how to use type hints in Python.
         )
         self.enumerator_convo = Conversation(
             model=self.params.model,
-            messages=[ChatCompletionSystemMessageParam(role="system", content=prompt)],
+            messages=[
+                ChatCompletionSystemMessageParam(
+                    role="system",
+                    content="""
+You are an expert assistant for enumerating potential bugs in Python programs. You are ALWAYS careful to ONLY identify bugs that you are relatively sure about, in order to minimize your false positive rate.
+""".strip(),
+                )
+            ],
             tools=[EnumerateBugs.template.to_chat_completion_tool_param()],
             cumulative=False,
         )
@@ -328,20 +338,22 @@ Search StackOverflow for how to use type hints in Python.
             list(
                 filter(
                     lambda fn: fn.startswith(self.params.name),
-                    os.listdir("../../transcripts/"),
+                    os.listdir(f"{pybughive.repository_path}transcripts/"),
                 ),
             )
         )
         transcript_filename = f"transcripts/{self.params.name}_{str(n)}.json"
         debug_log(f"writing transcript to file: {transcript_filename}")
-        for action in self.transcript:
-            print(asdict_super(action))
+        # for action in self.transcript:
+        #     print(asdict_super(action))
         json.dump(
             [asdict_super(action) for action in self.transcript],
-            open(f"../../{transcript_filename}", "w+"),
+            open(f"{pybughive.repository_path}{transcript_filename}", "w+"),
         )
 
-    def enumerate_potential_bugs(self, action: EnumeratePotentialBugsMessage):
+    def enumerate_potential_bugs(
+        self, action: EnumeratePotentialBugsMessage
+    ) -> list[str]:
         self.transcribe_action(action)
         self.enumerator_convo.messages.append(action.msg)
         message = self.enumerator_convo.next_message()
@@ -351,8 +363,9 @@ Search StackOverflow for how to use type hints in Python.
                 _tool_use=from_ChatCompletionMessageToolCall_to_ToolUse(tool_call),
             )
             self.transcribe_action(tooluse_action)
-            if isinstance(tooluse_action._tool_use, EnumerateBugs):
-                raise Exception("TODO")
+            tool_use = tooluse_action._tool_use
+            if isinstance(tool_use, EnumerateBugs):
+                return tool_use.potential_bugs
             else:
                 raise Exception(
                     f"enumerator_convo should use only tool EnumerateBugs: {tooluse_action._tool_use}"
@@ -377,8 +390,8 @@ Search StackOverflow for how to use type hints in Python.
             question_list = stackexchange.query_questions(query_string)["items"]
             if len(question_list) == 0:
                 tool_call_message = ChatCompletionToolMessageParam(
-                    content="No questions matched that query.",
                     role="tool",
+                    content="No questions matched that query.",
                     tool_call_id=action.tool_call_id,
                 )
             else:
@@ -414,8 +427,8 @@ The following are the top question that matched the query, along with their acce
                 # debug_log(f"[diagnostics]\n{"\n\n".join(diagnostics)}")
 
                 tool_call_message = ChatCompletionToolMessageParam(
-                    content=content,
                     role="tool",
+                    content=content,
                     tool_call_id=action.tool_call_id,
                 )
 
@@ -458,7 +471,7 @@ file: {diff_block.patched_file.source_file.strip("a/")}
             ]
         )
 
-        self.enumerate_potential_bugs(
+        potential_bugs = self.enumerate_potential_bugs(
             EnumeratePotentialBugsMessage(
                 ChatCompletionUserMessageParam(
                     role="user",
@@ -467,24 +480,52 @@ Consider the following Python code from various files in a project.
 
 {diff_block_pp_s}
 
-These files exist in a larger project that you don't have access to, but try to infer what that context would probably be in order to make sense of this code that you do have access to.
+These files exist in a larger project that you don't have access to, but try to infer what that context would probably be in order to make sense of this code that you do have access to. You should assume that things defined in the snippets included above are used elsewhere in the project. You should also assume that things referenced but not defined in the snippets are defined elsewhere in the project.
 
 Now, use the "enumerate_potential_bugs" tool to enumerate the most likely potential bugs that could be present in the sections of code you've been presented with above.
-Note that there may be NO bugs, or at most A FEW (around 1-3) bugs.
+Note that there may be NO bugs, or at most a few (around 1-3) bugs.
 """.strip(),
                 )
             )
         )
-        message = self.next_main_message(NextMainMessage())
-        debug_log(f"message.tool_calls: {str(message.tool_calls)}")
-        for tool_call in message.tool_calls if message.tool_calls is not None else []:
-            self.handle_tool_call_agent_action(
-                ToolUseAgentAction(
-                    tool_call_id=tool_call.id,
-                    _tool_use=from_ChatCompletionMessageToolCall_to_ToolUse(tool_call),
-                )
+        potential_bugs_descs = "\n\n".join(
+            [
+                f"Potential Bug #{i}: {potential_bug.strip()}"
+                for i, potential_bug in enumerate(potential_bugs)
+            ]
+        )
+        self.append_main_message(
+            AppendMainMessage(
+                {
+                    "role": "tool",
+                    "content": f"""
+The following potential bugs were identified:
+
+{potential_bugs_descs}
+""".strip(),
+                }
             )
-        # TODO: agent decides what to do next
+        )
+        # for i, potential_bug in enumerate(potential_bugs):
+        #     self.append_main_message(
+        #         AppendMainMessage(
+        #             {"role": "user", "content": f"For bug #{i}, "}
+        #         )
+        #     )
+
+        #     message = self.next_main_message(NextMainMessage())
+        #     debug_log(f"message.tool_calls: {str(message.tool_calls)}")
+        #     for tool_call in (
+        #         message.tool_calls if message.tool_calls is not None else []
+        #     ):
+        #         self.handle_tool_call_agent_action(
+        #             ToolUseAgentAction(
+        #                 tool_call_id=tool_call.id,
+        #                 _tool_use=from_ChatCompletionMessageToolCall_to_ToolUse(
+        #                     tool_call
+        #                 ),
+        #             )
+        #         )
 
         self.save_transcript()
 
