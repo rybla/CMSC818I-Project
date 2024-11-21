@@ -24,6 +24,15 @@ class ProjectIssue:
     def dir(self):
         return f"/users/henry/Documents/cmsc818I/project/repositories/{self.repository}"
 
+    def ident(self):
+        return " ".join(
+            [
+                f"username={self.username}",
+                f"repo={self.repository}",
+                f"i={self.issue_index}",
+            ]
+        )
+
 
 def get_project_info(project_issue: ProjectIssue) -> dict:
     with open(pybughive_dataset_filename, "r") as pybughive_dataset_file:

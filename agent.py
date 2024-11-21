@@ -60,11 +60,22 @@ def asdict_super(x):
 
 @dataclass
 class AgentParams:
-    name: str
-    model: ChatModel
-    max_questions: int
     project_issue: ProjectIssue
+
+    model: ChatModel
     gas: int
+
+    using_stackoverflow: bool
+    max_questions: int
+
+    def ident(self):
+        return " ".join(
+            [
+                f"project_issue=({self.project_issue.ident()})",
+                f"model={self.model}",
+                f"gas={self.gas}",
+            ]
+        )
 
 
 # ==============================================================================
@@ -337,12 +348,12 @@ You are an expert assistant for enumerating potential bugs in Python programs. Y
         n = len(
             list(
                 filter(
-                    lambda fn: fn.startswith(self.params.name),
+                    lambda fn: fn.startswith(self.params.ident()),
                     os.listdir(f"{pybughive.repository_path}transcripts/"),
                 ),
             )
         )
-        transcript_filename = f"transcripts/{self.params.name}_{str(n)}.json"
+        transcript_filename = f"transcripts/{self.params.ident()} #{str(n)}.json"
         debug_log(f"writing transcript to file: {transcript_filename}")
         # for action in self.transcript:
         #     print(asdict_super(action))
@@ -533,14 +544,14 @@ The following potential bugs were identified:
 if __name__ == "__main__":
     agent = Agent(
         AgentParams(
-            name="test",
-            model="gpt-3.5-turbo",
-            # model="gpt-4-turbo",
-            max_questions=1,
             project_issue=ProjectIssue(
                 username="psf", repository="black", issue_index=0
             ),
+            model="gpt-3.5-turbo",
+            # model="gpt-4-turbo",
             gas=10,
+            max_questions=1,
+            using_stackoverflow=True,
         ),
     )
     agent.run()
