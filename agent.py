@@ -687,7 +687,10 @@ project_issues = [
         ProjectIssue(username="psf", repository="black", issue_index=i)
         for i in range(38)
     ],
-    ProjectIssue(username="cookiecutter", repository="cookiecutter", issue_index=0),
+    [
+        ProjectIssue(username="cookiecutter", repository="cookiecutter", issue_index=i)
+        for i in range(2)
+    ],
 ]
 
 
