@@ -274,12 +274,12 @@ class AppendMainMessage(AgentAction):
                     self.msg["content"] if "content" in self.msg else self.msg.content
                 ),
                 "tool_call_id": (
-                    (self.msg["tool_call_id"] if "tool_call_id" in self.msg else "null")
+                    (self.msg["tool_call_id"] if "tool_call_id" in self.msg else "None")
                     if isinstance(self.msg, dict)
                     else (
                         self.msg.tool_call_id
                         if "tool_call_id" in self.msg.__annotations__
-                        else "null"
+                        else "None"
                     )
                 ),
             },
@@ -305,6 +305,18 @@ class EnumeratePotentialBugsMessage(AgentAction):
                 ),
             },
         }
+
+
+@dataclass
+class RecordBug(AgentAction):
+    _tag = "RecordBug"
+    bug_description: str
+
+    def __str__(self):
+        return f"RecordBug({self.bug_description})"
+
+    def toJSON(self):
+        return {"_tag": self._tag, "bug_description": self.bug_description}
 
 
 @dataclass
@@ -484,6 +496,9 @@ You are an expert assistant for enumerating potential bugs in Python programs. Y
         self.transcribe_action(MainToolMessage(msg))
         self.main_convo.messages.append(msg)
 
+    def record_bug(self, bug_description: str):
+        self.transcribe_action(RecordBug(bug_description))
+
     def handle_tool_call_agent_action(self, action: ToolUseAgentAction):
         self.transcribe_action(action)
         if isinstance(action._tool_use, QueryStackOverflow):
@@ -625,10 +640,12 @@ Now, for Potential Bug #{i + 1}, make a relevant query to StackOverflow, using t
                     )
                 )
 
-                message = self.next_main_message(NextMainMessage())
+                search_for_help = self.next_main_message(NextMainMessage())
 
                 for tool_call in (
-                    message.tool_calls if message.tool_calls is not None else []
+                    search_for_help.tool_calls
+                    if search_for_help.tool_calls is not None
+                    else []
                 ):
                     self.handle_tool_call_agent_action(
                         ToolUseAgentAction(
@@ -646,13 +663,23 @@ Now, for Potential Bug #{i + 1}, make a relevant query to StackOverflow, using t
                             content=f"""
     Given this new additional context, now respond with one of the following:
     - if you now think the potential bug is probably NOT a bug, then respond with: "NO BUG"
-    - if you STILL think the potential bug is probably a bug, then respond with an updated description of the potential bug
+    - if you STILL think the potential bug probably IS a bug, then respond with "YES BUG" followed up an updated description of the potential bug
+    
+    You MUST repond with exactly one of those options.
     """.strip(),
                         )
                     )
                 )
 
-                self.next_main_message(NextMainMessage())
+                judgment: ChatCompletionMessage = self.next_main_message(
+                    NextMainMessage()
+                )
+                if "YES BUG" in judgment.content.upper():
+                    self.record_bug(judgment.content)
+                elif "NO BUG" in judgment.content.upper():
+                    pass
+                else:
+                    debug_log(f"failed to judge potential bug: {potential_bug}")
 
         self.save_transcript()
 
