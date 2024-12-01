@@ -7,6 +7,7 @@ import json
 import html
 import subprocess
 from typing import Any, Literal, Self, TypeVar
+import itertools
 
 from openai import NOT_GIVEN
 from pybughive import (
@@ -46,6 +47,8 @@ from ai import client
 from utilities import debug_log, find_innermost_scope
 import random
 
+_DEBUG_MODE = False
+
 random.seed()
 
 Cls = TypeVar("Cls")
@@ -70,11 +73,14 @@ class AgentParams:
 
     def ident(self):
         return " ".join(
-            [
-                f"project_issue=({self.project_issue.ident()})",
-                f"model={self.model}",
-                f"gas={self.gas}",
-            ]
+            itertools.chain.from_iterable(
+                [
+                    [f"project_issue=({self.project_issue.ident()})"],
+                    [f"model={self.model}"],
+                    [f"gas={self.gas}"],
+                    ["debug"] if _DEBUG_MODE else [],
+                ]
+            )
         )
 
 
@@ -117,6 +123,10 @@ class ToolTemplate:
 class ToolUse:
     template: ToolTemplate
 
+    @abstractmethod
+    def toJSON(self):
+        pass
+
 
 all_tool_use_classes: list[type[ToolUse]] = []
 
@@ -138,33 +148,44 @@ Mismatch in ToolMeta template parameters and class annotations:
     return cls
 
 
-query_stackoverflow = ToolTemplate(
-    name="query_stackoverflow",
-    description="Query StackOver for related questions and answers.",
-    parameters={
-        "query_string": {
-            "type": "string",
-            "description": "The query string to send to StackOverflow. This should just be a concise collection of the most relevant keywords.",
-        }
-    },
-)
-
-
 # ==============================================================================
 
 
 class AgentAction:
     _tag: str
 
+    @abstractmethod
+    def toJSON(self):
+        pass
+
+
+@dataclass
+class DoneAgentAction(AgentAction):
+    _tag = "Done"
+    remaining_gas: int
+
+    def __str__(self):
+        return f"Done(remaining_gas={self.remaining_gas})"
+
+    def toJSON(self):
+        return {"_tag": self._tag, "remaining_gas": self.remaining_gas}
+
 
 @dataclass
 class ToolUseAgentAction(AgentAction):
-    tag = "ToolUse"
+    _tag = "ToolUse"
     tool_call_id: str
     _tool_use: ToolUse
 
     def __str__(self):
         return f"ToolUseAgentAction({self._tool_use.template.name}, ...)"
+
+    def toJSON(self):
+        return {
+            "_tag": self._tag,
+            "tool_call_id": self.tool_call_id,
+            "_tool_use": self._tool_use.toJSON(),
+        }
 
 
 def from_ChatCompletionMessageToolCall_to_ToolUse(
@@ -186,7 +207,7 @@ class EnumerateBugs(ToolUse):
         parameters={
             "potential_bugs": {
                 "type": "array",
-                "description": "Array of potential bugs. Each item is a concise description of a single potential bug, and explicitly references the points of the source code that the bug manifests in.",
+                "description": "Array of potential bugs. Each item is a concise description of a single potential bug, and explicitly references the points of the source code that the bug manifests in. DO NOT include numberings or bullet points at the beginning of each bug description.",
                 "items": {"type": "string"},
             }
         },
@@ -197,13 +218,16 @@ class EnumerateBugs(ToolUse):
     def __str__(self):
         return f"EnumerateBugs(...)"
 
+    def toJSON(self):
+        return {"name": self.template.name, "potential_bugs": self.potential_bugs}
+
 
 @dataclass
 @toolclass
 class QueryStackOverflow(ToolUse):
     template = ToolTemplate(
         name="query_stackoverflow",
-        description="Query StackOver for related questions and answers.",
+        description="Query StackOverflow for related questions and answers.",
         parameters={
             "query_string": {
                 "type": "string",
@@ -217,6 +241,9 @@ class QueryStackOverflow(ToolUse):
     def __str__(self):
         return "QueryStackOverflow(...)"
 
+    def toJSON(self):
+        return {"name": self.template.name, "query_string": self.query_string}
+
 
 @dataclass
 class NextMainMessage(AgentAction):
@@ -224,6 +251,9 @@ class NextMainMessage(AgentAction):
 
     def __str__(self):
         return "NextMainMessage(...)"
+
+    def toJSON(self):
+        return {"_tag": self._tag}
 
 
 @dataclass
@@ -234,6 +264,27 @@ class AppendMainMessage(AgentAction):
     def __str__(self):
         return "AppendMainMessage(...)"
 
+    def toJSON(self):
+        return {
+            "_tag": self._tag,
+            # "msg": {"role": self.msg.get("role"), "content": self.msg.get("content")},
+            "msg": {
+                "role": self.msg["role"] if "role" in self.msg else self.msg.role,
+                "content": (
+                    self.msg["content"] if "content" in self.msg else self.msg.content
+                ),
+                "tool_call_id": (
+                    (self.msg["tool_call_id"] if "tool_call_id" in self.msg else "null")
+                    if isinstance(self.msg, dict)
+                    else (
+                        self.msg.tool_call_id
+                        if "tool_call_id" in self.msg.__annotations__
+                        else "null"
+                    )
+                ),
+            },
+        }
+
 
 @dataclass
 class EnumeratePotentialBugsMessage(AgentAction):
@@ -243,6 +294,18 @@ class EnumeratePotentialBugsMessage(AgentAction):
     def __str__(self):
         return "EnumeratePotentialBugsMessage(...)"
 
+    def toJSON(self):
+        return {
+            "_tag": self._tag,
+            # "msg": {"role": self.msg.get("role"), "content": self.msg.get("content")},
+            "msg": {
+                "role": self.msg["role"] if "role" in self.msg else self.msg.role,
+                "content": (
+                    self.msg["content"] if "content" in self.msg else self.msg.content
+                ),
+            },
+        }
+
 
 @dataclass
 class MainToolMessage(AgentAction):
@@ -251,6 +314,22 @@ class MainToolMessage(AgentAction):
 
     def __str__(self):
         return "MainToolMessage"
+
+    def toJSON(self):
+        return {
+            "_tag": self._tag,
+            "msg": {
+                "role": self.msg["role"] if "role" in self.msg else self.msg.role,
+                "content": (
+                    self.msg["content"] if "content" in self.msg else self.msg.content
+                ),
+                "tool_call_id": (
+                    self.msg["tool_call_id"]
+                    if "tool_call_id" in self.msg
+                    else self.msg.tool_call_id
+                ),
+            },
+        }
 
 
 def from_tool_call_to_tool_call_param(
@@ -275,6 +354,11 @@ class Conversation:
     cumulative: bool
 
     def next_message(self) -> ChatCompletionMessage:
+        # print(f"BEGIN messages")
+        # for msg in self.messages:
+        #     print(msg)
+        # print(f"END messages")
+
         completion = client.chat.completions.create(
             model=self.model,
             messages=self.messages,
@@ -287,8 +371,11 @@ class Conversation:
 
         if self.cumulative:
             self.messages.append(
-                ChatCompletionMessageParam(
-                    role=choice.message.role, content=choice.message.content
+                ChatCompletionAssistantMessageParam(
+                    content=choice.message.content,
+                    refusal=choice.message.refusal,
+                    role=choice.message.role,
+                    tool_calls=choice.message.tool_calls,
                 )
             )
 
@@ -357,8 +444,9 @@ You are an expert assistant for enumerating potential bugs in Python programs. Y
         debug_log(f"writing transcript to file: {transcript_filename}")
         # for action in self.transcript:
         #     print(asdict_super(action))
+        self.transcript.append(DoneAgentAction(remaining_gas=self.gas))
         json.dump(
-            [asdict_super(action) for action in self.transcript],
+            [action.toJSON() for action in self.transcript],
             open(f"{pybughive.repository_path}{transcript_filename}", "w+"),
         )
 
@@ -384,7 +472,9 @@ You are an expert assistant for enumerating potential bugs in Python programs. Y
 
     def next_main_message(self, action: NextMainMessage) -> ChatCompletionMessage:
         self.transcribe_action(action)
-        return self.main_convo.next_message()
+        message = self.main_convo.next_message()
+        self.transcribe_action(AppendMainMessage(message))
+        return message
 
     def append_main_message(self, action: AppendMainMessage):
         self.transcribe_action(action)
@@ -486,57 +576,83 @@ file: {diff_block.patched_file.source_file.strip("a/")}
             EnumeratePotentialBugsMessage(
                 ChatCompletionUserMessageParam(
                     role="user",
-                    content=f"""
+                    content=(
+                        f"""
 Consider the following Python code from various files in a project.
-
 {diff_block_pp_s}
-
 These files exist in a larger project that you don't have access to, but try to infer what that context would probably be in order to make sense of this code that you do have access to. You should assume that things defined in the snippets included above are used elsewhere in the project. You should also assume that things referenced but not defined in the snippets are defined elsewhere in the project.
-
 Now, use the "enumerate_potential_bugs" tool to enumerate the most likely potential bugs that could be present in the sections of code you've been presented with above.
 Note that there may be NO bugs, or at most a few (around 1-3) bugs.
-""".strip(),
+                    """.strip()
+                        if not _DEBUG_MODE
+                        else f"""
+Use the "enumerate_potential_bugs" tool to give a give a single example bug.
+Make your description of the bug as concise as possible.
+""".strip()
+                    ),
                 )
             )
         )
         potential_bugs_descs = "\n\n".join(
             [
-                f"Potential Bug #{i}: {potential_bug.strip()}"
+                f"Potential Bug #{i + 1}: {potential_bug.strip()}"
                 for i, potential_bug in enumerate(potential_bugs)
             ]
         )
         self.append_main_message(
             AppendMainMessage(
-                {
-                    "role": "tool",
-                    "content": f"""
+                ChatCompletionUserMessageParam(
+                    role="user",
+                    content=f"""
 The following potential bugs were identified:
 
 {potential_bugs_descs}
 """.strip(),
-                }
+                )
             )
         )
-        # for i, potential_bug in enumerate(potential_bugs):
-        #     self.append_main_message(
-        #         AppendMainMessage(
-        #             {"role": "user", "content": f"For bug #{i}, "}
-        #         )
-        #     )
 
-        #     message = self.next_main_message(NextMainMessage())
-        #     debug_log(f"message.tool_calls: {str(message.tool_calls)}")
-        #     for tool_call in (
-        #         message.tool_calls if message.tool_calls is not None else []
-        #     ):
-        #         self.handle_tool_call_agent_action(
-        #             ToolUseAgentAction(
-        #                 tool_call_id=tool_call.id,
-        #                 _tool_use=from_ChatCompletionMessageToolCall_to_ToolUse(
-        #                     tool_call
-        #                 ),
-        #             )
-        #         )
+        if self.params.using_stackoverflow:
+            for i, potential_bug in enumerate(potential_bugs):
+                self.append_main_message(
+                    AppendMainMessage(
+                        ChatCompletionUserMessageParam(
+                            role="user",
+                            content=f"""
+Now, for Potential Bug #{i + 1}, make a relevant query to StackOverflow, using the `query_stackoverflow` tool, in order to get extra information.
+""".strip(),
+                        )
+                    )
+                )
+
+                message = self.next_main_message(NextMainMessage())
+
+                for tool_call in (
+                    message.tool_calls if message.tool_calls is not None else []
+                ):
+                    self.handle_tool_call_agent_action(
+                        ToolUseAgentAction(
+                            tool_call_id=tool_call.id,
+                            _tool_use=from_ChatCompletionMessageToolCall_to_ToolUse(
+                                tool_call
+                            ),
+                        )
+                    )
+
+                self.append_main_message(
+                    AppendMainMessage(
+                        ChatCompletionUserMessageParam(
+                            role="user",
+                            content=f"""
+    Given this new additional context, now respond with one of the following:
+    - if you now think the potential bug is probably NOT a bug, then respond with: "NO BUG"
+    - if you STILL think the potential bug is probably a bug, then respond with an updated description of the potential bug
+    """.strip(),
+                        )
+                    )
+                )
+
+                self.next_main_message(NextMainMessage())
 
         self.save_transcript()
 
@@ -549,7 +665,7 @@ if __name__ == "__main__":
             ),
             model="gpt-3.5-turbo",
             # model="gpt-4-turbo",
-            gas=10,
+            gas=100,
             max_questions=1,
             using_stackoverflow=True,
         ),
