@@ -267,7 +267,6 @@ class AppendMainMessage(AgentAction):
     def toJSON(self):
         return {
             "_tag": self._tag,
-            # "msg": {"role": self.msg.get("role"), "content": self.msg.get("content")},
             "msg": {
                 "role": self.msg["role"] if "role" in self.msg else self.msg.role,
                 "content": (
@@ -297,7 +296,6 @@ class EnumeratePotentialBugsMessage(AgentAction):
     def toJSON(self):
         return {
             "_tag": self._tag,
-            # "msg": {"role": self.msg.get("role"), "content": self.msg.get("content")},
             "msg": {
                 "role": self.msg["role"] if "role" in self.msg else self.msg.role,
                 "content": (
@@ -595,7 +593,7 @@ file: {diff_block.patched_file.source_file.strip("a/")}
                         f"""
 Consider the following Python code from various files in a project.
 {diff_block_pp_s}
-These files exist in a larger project that you don't have access to, but try to infer what that context would probably be in order to make sense of this code that you do have access to. You should assume that things defined in the snippets included above are used elsewhere in the project. You should also assume that things referenced but not defined in the snippets are defined elsewhere in the project.
+These files exist in a larger project that you don't have access to, but try to infer what that context would probably be in order to make sense of this code that you do have access to. You should assume that things defined in the snippets included above are used elsewhere in the project. You should also assume that things referenced but not defined in the snippets are imported from dependencies or other parts of the project.
 Now, use the "enumerate_potential_bugs" tool to enumerate the most likely potential bugs that could be present in the sections of code you've been presented with above.
 Note that there may be NO bugs, or at most a few (around 1-3) bugs.
                     """.strip()
@@ -684,12 +682,19 @@ Now, for Potential Bug #{i + 1}, make a relevant query to StackOverflow, using t
         self.save_transcript()
 
 
+project_issues = [
+    [
+        ProjectIssue(username="psf", repository="black", issue_index=i)
+        for i in range(38)
+    ],
+    ProjectIssue(username="cookiecutter", repository="cookiecutter", issue_index=0),
+]
+
+
 if __name__ == "__main__":
     agent = Agent(
         AgentParams(
-            project_issue=ProjectIssue(
-                username="psf", repository="black", issue_index=0
-            ),
+            project_issue=project_issues[1],
             model="gpt-3.5-turbo",
             # model="gpt-4-turbo",
             gas=100,
