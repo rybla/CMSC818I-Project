@@ -549,10 +549,11 @@ The following are the top question that matched the query, along with their acce
             self.append_main_tool_message(tool_call_message)
 
     def run(self):
-        global innermost
+        # global innermost
         checkout_project_at_issue(self.params.project_issue)
         diff_blocks = project_issue_diff_blocks(self.params.project_issue)
         diff_blocks_pp_buggy: list[tuple[DiffBlock, str]] = []
+        dlint_results: list[str] = []
         for diff_block in diff_blocks:
             source_line_range, _ = diff_block.line_ranges()
             source_file = diff_block.patched_file.source_file.strip("a/")
@@ -560,6 +561,33 @@ The following are the top question that matched the query, along with their acce
             # only care about changes in python files
             if not source_file.endswith(".py"):
                 continue
+
+            raw_dlint_results = subprocess.run(
+                [
+                    "python",
+                    "-mflake8",
+                    "--select=DUO",
+                    source_file,
+                ],
+                capture_output=True,
+                text=True,
+            ).stdout.splitlines()
+
+            for dlint_result in raw_dlint_results:
+                # example: dlint_result = 'tests/data/fmtonoff.py:178:3: DUO105 use of "exec" is insecure'
+                i = dlint_result.find("DUO")
+                if i == -1:
+                    continue
+                loc = dlint_result[: i - 1]
+                loc_parts = loc.split(":")
+                loc_line = int(loc_parts[1])
+                if not (
+                    source_line_range[0] <= loc_line
+                    and loc_line <= source_line_range[1]
+                ):
+                    continue
+                # desc = dlint_result[i:]
+                dlint_results.append(dlint_result)
 
             debug_log(f"extracting diff block from {source_file}")
             with open(source_file, "r") as f:
@@ -570,6 +598,7 @@ The following are the top question that matched the query, along with their acce
             if innermost is None:
                 raise Exception("failed to find innermost class or function scope")
             else:
+                # TODO: include line numbers?
                 innermost_pp = ast.unparse(innermost)
                 diff_blocks_pp_buggy.append((diff_block, innermost_pp))
 
@@ -585,6 +614,11 @@ file: {diff_block.patched_file.source_file.strip("a/")}
             ]
         )
 
+        dlint_results_s = "\n".join(dlint_results)
+        print(f"dlint_results_s: {dlint_results_s}")
+        if len(dlint_results_s) == 0:
+            quit()
+
         potential_bugs = self.enumerate_potential_bugs(
             EnumeratePotentialBugsMessage(
                 ChatCompletionUserMessageParam(
@@ -593,6 +627,10 @@ file: {diff_block.patched_file.source_file.strip("a/")}
                         f"""
 Consider the following Python code from various files in a project.
 {diff_block_pp_s}
+
+A Python linter called DUO was run on these files. The following are the relevant diagnostics:
+{dlint_results_s}
+
 These files exist in a larger project that you don't have access to, but try to infer what that context would probably be in order to make sense of this code that you do have access to. You should assume that things defined in the snippets included above are used elsewhere in the project. You should also assume that things referenced but not defined in the snippets are imported from dependencies or other parts of the project.
 Now, use the "enumerate_potential_bugs" tool to enumerate the most likely potential bugs that could be present in the sections of code you've been presented with above.
 Note that there may be NO bugs, or at most a few (around 1-3) bugs.
@@ -682,22 +720,28 @@ Now, for Potential Bug #{i + 1}, make a relevant query to StackOverflow, using t
         self.save_transcript()
 
 
-project_issues = [
-    [
-        ProjectIssue(username="psf", repository="black", issue_index=i)
-        for i in range(38)
-    ],
-    [
-        ProjectIssue(username="cookiecutter", repository="cookiecutter", issue_index=i)
-        for i in range(2)
-    ],
-]
+project_issues = list(
+    itertools.chain.from_iterable(
+        [
+            [
+                ProjectIssue(username="psf", repository="black", issue_index=i)
+                for i in range(38)
+            ],
+            [
+                ProjectIssue(
+                    username="cookiecutter", repository="cookiecutter", issue_index=i
+                )
+                for i in range(2)
+            ],
+        ]
+    )
+)
 
 
 if __name__ == "__main__":
     agent = Agent(
         AgentParams(
-            project_issue=project_issues[1],
+            project_issue=project_issues[16],
             model="gpt-3.5-turbo",
             # model="gpt-4-turbo",
             gas=100,
